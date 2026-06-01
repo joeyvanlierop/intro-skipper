@@ -65,7 +65,9 @@ public partial class BaseItemAnalyzerTask(
         CancellationToken cancellationToken,
         IReadOnlyCollection<Guid>? seasonsToAnalyze = null)
     {
-        HashSet<AnalysisMode> modes = [
+        // Ordered, not a set: Recap end-extension reads the detected intro, so Introduction must
+        // be analyzed before Recap within a single pass. Each mode is added at most once.
+        List<AnalysisMode> modes = [
             .. _config.ScanIntroduction ? [AnalysisMode.Introduction] : Array.Empty<AnalysisMode>(),
             .. _config.ScanCredits ? [AnalysisMode.Credits] : Array.Empty<AnalysisMode>(),
             .. _config.ScanRecap ? [AnalysisMode.Recap] : Array.Empty<AnalysisMode>(),
@@ -266,8 +268,17 @@ public partial class BaseItemAnalyzerTask(
                 analyzers.Add(new ChromaprintAnalyzer(_loggerFactory.CreateLogger<ChromaprintAnalyzer>()));
             }
         }
+        else if (mode is AnalysisMode.Recap)
+        {
+            // Recap: Chromaprint matches the "Previously on" card near the start; the end is
+            // anchored to the detected intro by the post-step below.
+            if (!isMovie && _ffmpegValid)
+            {
+                analyzers.Add(new ChromaprintAnalyzer(_loggerFactory.CreateLogger<ChromaprintAnalyzer>()));
+            }
+        }
 
-        // Recap, Preview, Commercial: only ChapterAnalyzer (already added above)
+        // Preview, Commercial: only ChapterAnalyzer (already added above)
 
         // Apply priority overrides to reorder the analyzer chain.
         // The specified analyzer moves to the front; others keep their relative order.
@@ -304,6 +315,12 @@ public partial class BaseItemAnalyzerTask(
         if (mode == AnalysisMode.Credits && isAnime && _config.AnimePreviewFromCreditsEnd)
         {
             await CreateAnimePreviewFromCreditsAsync(plugin, items, cancellationToken).ConfigureAwait(false);
+        }
+
+        // For recaps, widen the chromaprint-matched card to end at the detected intro start.
+        if (mode == AnalysisMode.Recap)
+        {
+            await ExtendRecapToIntroAsync(plugin, items, cancellationToken).ConfigureAwait(false);
         }
 
         // Set the episode IDs for the analyzed items
@@ -353,6 +370,53 @@ public partial class BaseItemAnalyzerTask(
         }
 
         return new Segment(episodeId, new TimeRange(credits.End, episodeDuration));
+    }
+
+    /// <summary>
+    /// Widens a detected recap "card" (the chromaprint-matched "Previously on" region) to span from
+    /// the card start to the start of the intro, clamped to <paramref name="maximumRecapDuration"/>.
+    /// </summary>
+    /// <remarks>
+    /// The chromaprint analyzer only matches the short card across episodes; the recap body that
+    /// follows it differs every episode and cannot be matched. This step uses the already-detected
+    /// intro as the recap's end anchor (the recap precedes the intro). Returns <see langword="null"/>
+    /// when there is no valid card, no valid intro to anchor against, the intro does not follow the
+    /// card, or the recap already reaches the computed end (idempotent re-runs).
+    /// </remarks>
+    /// <param name="episodeId">Episode id.</param>
+    /// <param name="existingTimestamps">Current segments keyed by mode for this episode.</param>
+    /// <param name="maximumRecapDuration">Maximum allowed recap duration in seconds.</param>
+    /// <returns>Segment to write, or <see langword="null"/> when no write is needed.</returns>
+    public static Segment? ComputeRecapFromCard(
+        Guid episodeId,
+        IReadOnlyDictionary<AnalysisMode, Segment> existingTimestamps,
+        int maximumRecapDuration)
+    {
+        ArgumentNullException.ThrowIfNull(existingTimestamps);
+
+        if (!existingTimestamps.TryGetValue(AnalysisMode.Recap, out var card) || !card.Valid)
+        {
+            return null;
+        }
+
+        if (!existingTimestamps.TryGetValue(AnalysisMode.Introduction, out var intro) || !intro.Valid)
+        {
+            return null;
+        }
+
+        if (intro.Start <= card.Start)
+        {
+            return null;
+        }
+
+        var end = Math.Min(intro.Start, card.Start + maximumRecapDuration);
+
+        if (Math.Abs(card.End - end) <= AnimePreviewStartTolerance)
+        {
+            return null;
+        }
+
+        return new Segment(episodeId, new TimeRange(card.Start, end));
     }
 
     /// <summary>
@@ -426,8 +490,59 @@ public partial class BaseItemAnalyzerTask(
         }
     }
 
+    /// <summary>
+    /// Widens each episode's chromaprint-matched recap card to end at the detected intro start.
+    /// </summary>
+    /// <param name="plugin">Plugin instance.</param>
+    /// <param name="items">Media items to process.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    private async Task ExtendRecapToIntroAsync(
+        Plugin plugin,
+        IReadOnlyList<QueuedEpisode> items,
+        CancellationToken cancellationToken)
+    {
+        foreach (var episode in items)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            // Use GetSegmentsAsync (not GetTimestampsAsync) so we can see IsUserProvided and avoid
+            // overwriting a user-provided Recap with a misleading log + Analyzed state.
+            var dbSegments = await plugin.GetSegmentsAsync(episode.EpisodeId, cancellationToken).ConfigureAwait(false);
+
+            if (dbSegments.Any(s => s.Type == AnalysisMode.Recap && s.IsUserProvided))
+            {
+                LogSkippedUserProvidedRecap(_logger, episode.Name);
+                continue;
+            }
+
+            var timestamps = dbSegments
+                .GroupBy(s => s.Type)
+                .ToDictionary(g => g.Key, g => g.OrderBy(s => s.Start).First().ToSegment());
+
+            var recap = ComputeRecapFromCard(episode.EpisodeId, timestamps, _config.MaximumRecapDuration);
+            if (recap is null)
+            {
+                continue;
+            }
+
+            await plugin.UpdateTimestampAsync(recap, AnalysisMode.Recap, configHash: episode.AnalysisConfigHash, cancellationToken: cancellationToken).ConfigureAwait(false);
+            episode.SetAnalyzed(AnalysisMode.Recap, EpisodeState.Analyzed);
+
+            LogExtendedRecap(_logger, episode.Name, recap.Start, recap.End);
+        }
+    }
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "Created anime preview for {Episode}: {Start:F2}s to {End:F2}s")]
     private static partial void LogCreatedAnimePreview(ILogger logger, string episode, double start, double end);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Extended recap for {Episode}: {Start:F2}s to {End:F2}s")]
+    private static partial void LogExtendedRecap(ILogger logger, string episode, double start, double end);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Skipping recap extension for {Episode}: a user-provided Recap already exists.")]
+    private static partial void LogSkippedUserProvidedRecap(ILogger logger, string episode);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Skipping anime preview for {Episode}: a user-provided Preview already exists.")]
     private static partial void LogSkippedUserProvidedPreview(ILogger logger, string episode);

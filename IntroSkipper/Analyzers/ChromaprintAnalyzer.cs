@@ -17,6 +17,12 @@ namespace IntroSkipper.Analyzers;
 /// <param name="logger">Logger.</param>
 public partial class ChromaprintAnalyzer(ILogger<ChromaprintAnalyzer> logger) : IMediaFileAnalyzer
 {
+    /// <summary>
+    /// Minimum duration (seconds) for a shared region to count as a recap "Previously on" card.
+    /// The card sting is only a few seconds, far shorter than MinimumIntroDuration.
+    /// </summary>
+    private const double RecapCardMinimumDuration = 3.0;
+
     private readonly PluginConfiguration _config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
     private readonly ILogger<ChromaprintAnalyzer> _logger = logger;
     private readonly Dictionary<Guid, Dictionary<uint, int>> _invertedIndexCache = [];
@@ -180,12 +186,89 @@ public partial class ChromaprintAnalyzer(ILogger<ChromaprintAnalyzer> logger) : 
         {
             LogIndexSearchSuccessful();
 
-            return GetLongestTimeRange(lhsId, lhsRanges, rhsId, rhsRanges);
+            return SelectSharedRegion(lhsId, lhsRanges, rhsId, rhsRanges, _analysisMode);
         }
 
         LogSharedIntroNotFound(lhsId, rhsId);
 
         return (new Segment(lhsId), new Segment(rhsId));
+    }
+
+    /// <summary>
+    /// Returns the minimum shared-region duration (seconds) for the given analysis mode.
+    /// Recap admits the short "Previously on" card; all other modes use the configured intro minimum.
+    /// </summary>
+    /// <param name="mode">Analysis mode.</param>
+    /// <param name="minimumIntroDuration">Configured minimum intro duration.</param>
+    /// <returns>Minimum region duration in seconds.</returns>
+    internal static double GetMinimumRegionDuration(AnalysisMode mode, int minimumIntroDuration)
+    {
+        return mode == AnalysisMode.Recap ? RecapCardMinimumDuration : minimumIntroDuration;
+    }
+
+    /// <summary>
+    /// Selects which shared audio region to return for the given analysis mode.
+    /// Recap detection wants the earliest shared region (the "Previously on" card, which
+    /// precedes the intro); all other modes want the longest shared region.
+    /// </summary>
+    /// <param name="lhsId">First episode id.</param>
+    /// <param name="lhsRanges">First episode shared timecodes.</param>
+    /// <param name="rhsId">Second episode id.</param>
+    /// <param name="rhsRanges">Second episode shared timecodes.</param>
+    /// <param name="mode">Analysis mode.</param>
+    /// <returns>Segments for the first and second episodes.</returns>
+    internal static (Segment Lhs, Segment Rhs) SelectSharedRegion(
+        Guid lhsId,
+        List<TimeRange> lhsRanges,
+        Guid rhsId,
+        List<TimeRange> rhsRanges,
+        AnalysisMode mode)
+    {
+        return mode == AnalysisMode.Recap
+            ? GetEarliestTimeRange(lhsId, lhsRanges, rhsId, rhsRanges)
+            : GetLongestTimeRange(lhsId, lhsRanges, rhsId, rhsRanges);
+    }
+
+    /// <summary>
+    /// Locates the earliest shared range of similar audio and returns a Segment for each side.
+    /// The lhs/rhs ranges are paired by index (one entry per shift), so the rhs range at the
+    /// chosen index is returned alongside the earliest lhs range.
+    /// </summary>
+    /// <param name="lhsId">First episode id.</param>
+    /// <param name="lhsRanges">First episode shared timecodes.</param>
+    /// <param name="rhsId">Second episode id.</param>
+    /// <param name="rhsRanges">Second episode shared timecodes.</param>
+    /// <returns>Segments for the first and second episodes.</returns>
+    private static (Segment Lhs, Segment Rhs) GetEarliestTimeRange(
+        Guid lhsId,
+        List<TimeRange> lhsRanges,
+        Guid rhsId,
+        List<TimeRange> rhsRanges)
+    {
+        var earliestIndex = 0;
+        for (var i = 1; i < lhsRanges.Count; i++)
+        {
+            if (lhsRanges[i].Start < lhsRanges[earliestIndex].Start)
+            {
+                earliestIndex = i;
+            }
+        }
+
+        var lhsRecap = new TimeRange(lhsRanges[earliestIndex]);
+        var rhsRecap = new TimeRange(rhsRanges[earliestIndex]);
+
+        // If the recap starts early in the episode, move it to the beginning.
+        if (lhsRecap.Start <= 5)
+        {
+            lhsRecap.Start = 0;
+        }
+
+        if (rhsRecap.Start <= 5)
+        {
+            rhsRecap.Start = 0;
+        }
+
+        return (new Segment(lhsId, lhsRecap), new Segment(rhsId, rhsRecap));
     }
 
     /// <summary>
@@ -335,7 +418,7 @@ public partial class ChromaprintAnalyzer(ILogger<ChromaprintAnalyzer> logger) : 
 
         // Now that both fingerprints have been compared at this shift, see if there's a contiguous time range.
         var lContiguous = TimeRangeHelpers.FindContiguous([.. lhsTimes], _config.MaximumTimeSkip);
-        if (lContiguous is null || lContiguous.Duration < _config.MinimumIntroDuration)
+        if (lContiguous is null || lContiguous.Duration < GetMinimumRegionDuration(_analysisMode, _config.MinimumIntroDuration))
         {
             return (new TimeRange(), new TimeRange());
         }
