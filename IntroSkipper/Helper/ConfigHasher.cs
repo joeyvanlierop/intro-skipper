@@ -42,7 +42,8 @@ public static class ConfigHasher
                 $"{AdjustmentHash(config)}"),
 
             AnalysisMode.Recap => Invariant(
-                $"analysis|v1|mode={mode}|action={action}|chap={config.ChapterAnalyzerRecapPattern}|fullchap={config.FullLengthChapters}|min={config.MinimumRecapDuration}|max={config.MaximumRecapDuration}",
+                $"analysis|v1|mode={mode}|action={action}|prefer={config.PreferChromaprint}|chap={config.ChapterAnalyzerRecapPattern}|fullchap={config.FullLengthChapters}|min={config.MinimumRecapDuration}|max={config.MaximumRecapDuration}",
+                $"|pct={config.AnalysisPercent}|limit={config.AnalysisLengthLimit}|fpbits={config.MaximumFingerprintPointDifferences}|skip={config.MaximumTimeSkip}|shift={config.InvertedIndexShift}",
                 $"{AdjustmentHash(config)}"),
 
             AnalysisMode.Preview => Invariant(

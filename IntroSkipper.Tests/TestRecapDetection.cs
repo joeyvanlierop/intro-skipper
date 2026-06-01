@@ -4,7 +4,9 @@
 using System;
 using System.Collections.Generic;
 using IntroSkipper.Analyzers;
+using IntroSkipper.Configuration;
 using IntroSkipper.Data;
+using IntroSkipper.Helper;
 using IntroSkipper.ScheduledTasks;
 using Xunit;
 
@@ -150,5 +152,22 @@ public class TestRecapDetection
         };
 
         Assert.Null(BaseItemAnalyzerTask.ComputeRecapFromCard(EpisodeId, timestamps, MaxRecapDuration));
+    }
+
+    [Fact]
+    public void RecapHash_ChangesWhenChromaprintTuningChanges()
+    {
+        // Recap now relies on the chromaprint matcher, so changing its tuning must invalidate the
+        // stored analysis (force re-detection), the same as Introduction.
+        var baseline = new PluginConfiguration();
+        var tuned = new PluginConfiguration
+        {
+            MaximumFingerprintPointDifferences = baseline.MaximumFingerprintPointDifferences + 1,
+        };
+
+        var hashBaseline = ConfigHasher.Analysis(baseline, AnalysisMode.Recap, AnalyzerAction.Default);
+        var hashTuned = ConfigHasher.Analysis(tuned, AnalysisMode.Recap, AnalyzerAction.Default);
+
+        Assert.NotEqual(hashBaseline, hashTuned);
     }
 }
