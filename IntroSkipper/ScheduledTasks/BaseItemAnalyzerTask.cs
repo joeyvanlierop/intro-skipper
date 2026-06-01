@@ -523,6 +523,12 @@ public partial class BaseItemAnalyzerTask(
                 .ToDictionary(g => g.Key, g => g.OrderBy(s => s.Start).First().ToSegment());
 
             var recap = ComputeRecapFromCard(episode.EpisodeId, timestamps, _config.MaximumRecapDuration);
+
+            // TEMP recap-diag. Remove after debugging.
+            var diagHasCard = timestamps.TryGetValue(AnalysisMode.Recap, out var diagCard) && diagCard.Valid;
+            var diagHasIntro = timestamps.TryGetValue(AnalysisMode.Introduction, out var diagIntro) && diagIntro.Valid;
+            LogRecapDiagExtend(_logger, episode.Name, diagHasCard, diagHasIntro, recap is not null);
+
             if (recap is null)
             {
                 continue;
@@ -540,6 +546,9 @@ public partial class BaseItemAnalyzerTask(
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Extended recap for {Episode}: {Start:F2}s to {End:F2}s")]
     private static partial void LogExtendedRecap(ILogger logger, string episode, double start, double end);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "[recap-diag] extend {Episode}: hasCard={HasCard} hasIntro={HasIntro} wrote={Wrote}")]
+    private static partial void LogRecapDiagExtend(ILogger logger, string episode, bool hasCard, bool hasIntro, bool wrote);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Skipping recap extension for {Episode}: a user-provided Recap already exists.")]
     private static partial void LogSkippedUserProvidedRecap(ILogger logger, string episode);

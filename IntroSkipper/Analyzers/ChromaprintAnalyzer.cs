@@ -40,6 +40,14 @@ public partial class ChromaprintAnalyzer(ILogger<ChromaprintAnalyzer> logger) : 
             e.NeedsAnalysis(mode) ||
             (e.GetAnalyzed(mode) == EpisodeState.Analyzed && FFmpegWrapper.HasCachedFingerprint(e, mode))).ToList();
 
+        // TEMP recap-diag: surface why chromaprint may skip Recap. Remove after debugging.
+        if (mode == AnalysisMode.Recap)
+        {
+            var states = string.Join(",", analysisQueue.GroupBy(e => e.GetAnalyzed(mode)).Select(g => g.Key + "=" + g.Count()));
+            var willEarlyReturn = analysisQueue.Count <= 1 || episodeAnalysisQueue.All(e => e.GetAnalyzed(mode) == EpisodeState.Analyzed);
+            LogRecapDiagQueue(analysisQueue.Count, episodeAnalysisQueue.Count, states, willEarlyReturn);
+        }
+
         if (analysisQueue.Count <= 1 || episodeAnalysisQueue.All(e => e.GetAnalyzed(mode) == EpisodeState.Analyzed))
         {
             return analysisQueue;
@@ -158,6 +166,17 @@ public partial class ChromaprintAnalyzer(ILogger<ChromaprintAnalyzer> logger) : 
                 var adjustedIntro = timeAdjustmentHelper.AdjustIntroTimes(currentEpisode, intro);
                 currentEpisode.SetAnalyzed(mode, EpisodeState.Analyzed);
                 await Plugin.Instance!.UpdateTimestampAsync(adjustedIntro, mode, configHash: currentEpisode.AnalysisConfigHash, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+                // TEMP recap-diag. Remove after debugging.
+                if (mode == AnalysisMode.Recap)
+                {
+                    LogRecapDiagFound(currentEpisode.Name, adjustedIntro.Start, adjustedIntro.End);
+                }
+            }
+            else if (mode == AnalysisMode.Recap)
+            {
+                // TEMP recap-diag. Remove after debugging.
+                LogRecapDiagNotFound(currentEpisode.Name);
             }
         }
 
@@ -469,6 +488,15 @@ public partial class ChromaprintAnalyzer(ILogger<ChromaprintAnalyzer> logger) : 
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Caught fingerprint error")]
     private partial void LogCaughtFingerprintError(Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "[recap-diag] queue total={Total} toAnalyze={Queue} states=[{States}] earlyReturn={EarlyReturn}")]
+    private partial void LogRecapDiagQueue(int total, int queue, string states, bool earlyReturn);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "[recap-diag] {Episode}: card region {Start:F2}-{End:F2}")]
+    private partial void LogRecapDiagFound(string episode, double start, double end);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "[recap-diag] {Episode}: no shared region found")]
+    private partial void LogRecapDiagNotFound(string episode);
 
     [LoggerMessage(Level = LogLevel.Trace, Message = "Index search successful")]
     private partial void LogIndexSearchSuccessful();
